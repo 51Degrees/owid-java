@@ -21,7 +21,11 @@
     </licenses>
 
     <properties>
-        <maven.compiler.release>21</maven.compiler.release>
+        <!-- The shipped library targets Java 8 so it can be consumed by SDKs
+             on that floor (e.g. 51Degrees pipeline-java). Test sources use
+             newer language features and are compiled at a modern release
+             below; tests are not shipped. -->
+        <maven.compiler.release>8</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <junit.version>5.10.2</junit.version>
     </properties>
@@ -41,6 +45,17 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.13.0</version>
+                <executions>
+                    <!-- Main sources ship at Java 8 (see maven.compiler.release).
+                         Test sources use newer language features, so compile
+                         them at a modern release. -->
+                    <execution>
+                        <id>default-testCompile</id>
+                        <configuration>
+                            <release>17</release>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
