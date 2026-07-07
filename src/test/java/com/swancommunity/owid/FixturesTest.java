@@ -33,8 +33,42 @@ import org.junit.jupiter.api.Test;
 class FixturesTest {
 
     /** A set of fixtures produced by one implementation with one key. */
-    private record Fixtures(String spki, String simple, String utf8,
-            String chainParty, String chainRoot) {
+    private static final class Fixtures {
+
+        private final String spki;
+        private final String simple;
+        private final String utf8;
+        private final String chainParty;
+        private final String chainRoot;
+
+        Fixtures(String spki, String simple, String utf8,
+                String chainParty, String chainRoot) {
+            this.spki = spki;
+            this.simple = simple;
+            this.utf8 = utf8;
+            this.chainParty = chainParty;
+            this.chainRoot = chainRoot;
+        }
+
+        String spki() {
+            return spki;
+        }
+
+        String simple() {
+            return simple;
+        }
+
+        String utf8() {
+            return utf8;
+        }
+
+        String chainParty() {
+            return chainParty;
+        }
+
+        String chainRoot() {
+            return chainRoot;
+        }
     }
 
     private static final String UTF8_TEXT = "Zürich ❤ OWID £€";
@@ -115,7 +149,7 @@ class FixturesTest {
                 "chain root should verify alone");
 
         Owid party = Owid.fromBase64(fixtures.chainParty());
-        assertTrue(party.verifyWithCrypto(crypto, List.of(root)),
+        assertTrue(party.verifyWithCrypto(crypto, Collections.singletonList(root)),
                 "chain party should verify with the root as the other");
         assertFalse(party.verifyWithCrypto(crypto, none),
                 "chain party should fail with no others");
@@ -131,7 +165,7 @@ class FixturesTest {
         byte[] tamperedParty =
                 flipLastByte(Base64.getMimeDecoder().decode(fixtures.chainParty()));
         Owid party2 = Owid.fromByteArray(tamperedParty);
-        assertFalse(party2.verifyWithCrypto(crypto, List.of(root)),
+        assertFalse(party2.verifyWithCrypto(crypto, Collections.singletonList(root)),
                 "a flipped party signature byte should break verification");
     }
 
