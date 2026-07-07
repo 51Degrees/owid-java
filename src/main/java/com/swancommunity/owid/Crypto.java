@@ -16,6 +16,7 @@
 
 package com.swancommunity.owid;
 
+import java.io.ByteArrayOutputStream;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
 import java.security.KeyPair;
@@ -26,6 +27,7 @@ import java.security.Signature;
 import java.security.spec.ECGenParameterSpec;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
+import java.util.Arrays;
 import java.util.Base64;
 
 /**
@@ -35,9 +37,12 @@ import java.util.Base64;
  * <p>OWID uses ECDSA with the NIST P-256 curve (also known as secp256r1 or
  * prime256v1) and the SHA-256 hash, as required by the specification. The
  * signature is the 64 byte concatenation of the big endian r and s values
- * (IEEE P1363 format). The JDK signature algorithm
- * {@code SHA256withECDSAinP1363Format} produces and consumes this raw 64 byte
- * form directly, so no manual conversion to or from ASN.1 DER is needed.</p>
+ * (IEEE P1363 format). This class signs and verifies with the standard
+ * {@code SHA256withECDSA} algorithm, which produces and consumes ASN.1 DER, and
+ * converts between DER and the raw 64 byte form here. (The JDK
+ * {@code SHA256withECDSAinP1363Format} algorithm would do that conversion for
+ * us, but it is only available from Java 15 onwards; doing it manually keeps the
+ * library usable on Java 8.)</p>
  *
  * <p>An instance can hold both keys, or only one of them when created with
  * {@link #newSignOnly(String)} or {@link #newVerifyOnly(String)}.</p>
@@ -57,10 +62,15 @@ public final class Crypto {
     private static final String CURVE = "secp256r1";
 
     /**
-     * The signature algorithm that produces and consumes the raw 64 byte
-     * r concatenated with s form rather than ASN.1 DER.
+     * The signature algorithm. {@code SHA256withECDSA} produces and consumes
+     * ASN.1 DER and is available on Java 8; the raw 64 byte r||s form used on
+     * the wire is converted to and from DER by {@link #derToRaw(byte[])} and
+     * {@link #rawToDer(byte[])}.
      */
-    private static final String SIGNATURE_ALGORITHM = "SHA256withECDSAinP1363Format";
+    private static final String SIGNATURE_ALGORITHM = "SHA256withECDSA";
+
+    /** Byte length of each of the r and s values for the P-256 curve. */
+    private static final int COORDINATE_LENGTH = Owid.SIGNATURE_LENGTH / 2;
 
     private final PrivateKey privateKey;
     private final PublicKey publicKey;
@@ -159,11 +169,11 @@ public final class Crypto {
             Signature signature = Signature.getInstance(SIGNATURE_ALGORITHM);
             signature.initSign(privateKey);
             signature.update(data);
-            byte[] bytes = signature.sign();
-            if (bytes.length != Owid.SIGNATURE_LENGTH) {
-                throw Io.invalidSignatureLength(bytes.length);
+            byte[] raw = derToRaw(signature.sign());
+            if (raw.length != Owid.SIGNATURE_LENGTH) {
+                throw Io.invalidSignatureLength(raw.length);
             }
-            return bytes;
+            return raw;
         } catch (GeneralSecurityException e) {
             throw new OwidException("key operation failed because "
                     + e.getMessage(), e);
@@ -196,11 +206,164 @@ public final class Crypto {
             Signature verifier = Signature.getInstance(SIGNATURE_ALGORITHM);
             verifier.initVerify(publicKey);
             verifier.update(data);
-            return verifier.verify(signature);
-        } catch (GeneralSecurityException e) {
+            return verifier.verify(rawToDer(signature));
+        } catch (GeneralSecurityException | OwidException e) {
             // Bytes that can not form a valid signature can never verify.
             return false;
         }
+    }
+
+    /**
+     * Converts an ASN.1 DER encoded ECDSA signature into the raw 64 byte form,
+     * the 32 byte big endian r value followed by the 32 byte big endian s
+     * value. The DER form is a SEQUENCE holding two INTEGERs.
+     *
+     * @throws OwidException when the DER structure is malformed.
+     */
+    private static byte[] derToRaw(byte[] der) throws OwidException {
+        int[] position = {0};
+        if (der.length == 0 || (der[position[0]] & 0xFF) != 0x30) {
+            throw new OwidException("signature is not a DER sequence");
+        }
+        position[0] += 1;
+        readDerLength(der, position); // skip the SEQUENCE length
+        byte[] r = readDerInteger(der, position);
+        byte[] s = readDerInteger(der, position);
+        byte[] raw = new byte[Owid.SIGNATURE_LENGTH];
+        System.arraycopy(padCoordinate(r), 0, raw, 0, COORDINATE_LENGTH);
+        System.arraycopy(padCoordinate(s), 0, raw, COORDINATE_LENGTH,
+                COORDINATE_LENGTH);
+        return raw;
+    }
+
+    /**
+     * Converts a raw 64 byte signature (32 byte big endian r followed by 32
+     * byte big endian s) into an ASN.1 DER encoded ECDSA signature.
+     *
+     * @throws OwidException when the signature is not 64 bytes.
+     */
+    private static byte[] rawToDer(byte[] signature) throws OwidException {
+        if (signature.length != Owid.SIGNATURE_LENGTH) {
+            throw Io.invalidSignatureLength(signature.length);
+        }
+        byte[] rInteger = encodeDerInteger(
+                Arrays.copyOfRange(signature, 0, COORDINATE_LENGTH));
+        byte[] sInteger = encodeDerInteger(
+                Arrays.copyOfRange(signature, COORDINATE_LENGTH,
+                        Owid.SIGNATURE_LENGTH));
+        byte[] length = encodeDerLength(rInteger.length + sInteger.length);
+        ByteArrayOutputStream der = new ByteArrayOutputStream();
+        der.write(0x30);
+        der.write(length, 0, length.length);
+        der.write(rInteger, 0, rInteger.length);
+        der.write(sInteger, 0, sInteger.length);
+        return der.toByteArray();
+    }
+
+    /**
+     * Reads an ASN.1 length at {@code position[0]}, advances past the length
+     * bytes, and returns the length value.
+     */
+    private static int readDerLength(byte[] der, int[] position)
+            throws OwidException {
+        if (position[0] >= der.length) {
+            throw new OwidException("signature length is missing");
+        }
+        int first = der[position[0]++] & 0xFF;
+        if (first < 0x80) {
+            return first;
+        }
+        int byteCount = first & 0x7F;
+        if (byteCount == 0 || position[0] + byteCount > der.length) {
+            throw new OwidException("signature length is malformed");
+        }
+        int value = 0;
+        for (int index = 0; index < byteCount; index++) {
+            value = (value << 8) | (der[position[0]++] & 0xFF);
+        }
+        return value;
+    }
+
+    /**
+     * Reads a DER INTEGER at {@code position[0]}, advances past it, and returns
+     * the big endian value with any leading 0x00 sign byte removed.
+     */
+    private static byte[] readDerInteger(byte[] der, int[] position)
+            throws OwidException {
+        if (position[0] >= der.length || (der[position[0]] & 0xFF) != 0x02) {
+            throw new OwidException("signature value is not a DER integer");
+        }
+        position[0] += 1;
+        int length = readDerLength(der, position);
+        if (length <= 0 || position[0] + length > der.length) {
+            throw new OwidException("signature value length is malformed");
+        }
+        byte[] value = Arrays.copyOfRange(der, position[0], position[0] + length);
+        position[0] += length;
+        return trimLeadingZeros(value);
+    }
+
+    /** Left pads the big endian value with zeros to the coordinate length. */
+    private static byte[] padCoordinate(byte[] value) throws OwidException {
+        byte[] trimmed = trimLeadingZeros(value);
+        if (trimmed.length > COORDINATE_LENGTH) {
+            throw new OwidException("signature value is too large");
+        }
+        byte[] padded = new byte[COORDINATE_LENGTH];
+        System.arraycopy(trimmed, 0, padded,
+                COORDINATE_LENGTH - trimmed.length, trimmed.length);
+        return padded;
+    }
+
+    /**
+     * Encodes a big endian value as a DER INTEGER, prepending a 0x00 sign byte
+     * when the high bit of the first content byte is set so the value reads as
+     * positive.
+     */
+    private static byte[] encodeDerInteger(byte[] value) {
+        byte[] trimmed = trimLeadingZeros(value);
+        boolean prependZero = (trimmed[0] & 0x80) != 0;
+        int contentLength = trimmed.length + (prependZero ? 1 : 0);
+        byte[] length = encodeDerLength(contentLength);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(0x02);
+        out.write(length, 0, length.length);
+        if (prependZero) {
+            out.write(0x00);
+        }
+        out.write(trimmed, 0, trimmed.length);
+        return out.toByteArray();
+    }
+
+    /** Encodes a length as ASN.1 DER (short form below 128, else long form). */
+    private static byte[] encodeDerLength(int length) {
+        if (length < 0x80) {
+            return new byte[] {(byte) length};
+        }
+        byte[] buffer = new byte[4];
+        int index = buffer.length;
+        int remaining = length;
+        while (remaining > 0) {
+            buffer[--index] = (byte) (remaining & 0xFF);
+            remaining >>= 8;
+        }
+        int count = buffer.length - index;
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(0x80 | count);
+        out.write(buffer, index, count);
+        return out.toByteArray();
+    }
+
+    /**
+     * Removes leading 0x00 bytes, leaving the meaningful big endian value (a
+     * single 0x00 for an all-zero input).
+     */
+    private static byte[] trimLeadingZeros(byte[] value) {
+        int start = 0;
+        while (start < value.length - 1 && value[start] == 0x00) {
+            start++;
+        }
+        return start == 0 ? value : Arrays.copyOfRange(value, start, value.length);
     }
 
     /**
