@@ -8,16 +8,21 @@ on:
 
 jobs:
   test:
-    name: test
+    name: test (Java ${{ matrix.java }}, ${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        # The library ships at Java 8 (maven.compiler.release=8), so run the
+        # suite on the Java 8 runtime as well as later LTS/current releases.
+        # This guards against Java 9+ APIs and runtime-only regressions such as
+        # crypto algorithms that only exist on newer JDKs.
+        java: ['8', '11', '17', '21']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: ${{ matrix.java }}
       - run: mvn --batch-mode --update-snapshots test
