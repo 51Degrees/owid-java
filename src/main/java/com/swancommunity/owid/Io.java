@@ -175,7 +175,7 @@ final class Io {
                 throw new OwidException("domain '" + value + "' is not valid");
             }
         }
-        buffer.writeBytes(bytes);
+        buffer.write(bytes, 0, bytes.length);
         buffer.write(0);
     }
 
@@ -198,7 +198,7 @@ final class Io {
                     + "' exceeds the unsigned 32 bit limit");
         }
         writeUInt32(buffer, value.length);
-        buffer.writeBytes(value);
+        buffer.write(value, 0, value.length);
     }
 
     /** Writes the fixed length signature, validating the length. */
@@ -207,7 +207,7 @@ final class Io {
         if (value.length != Owid.SIGNATURE_LENGTH) {
             throw invalidSignatureLength(value.length);
         }
-        buffer.writeBytes(value);
+        buffer.write(value, 0, value.length);
     }
 
     /** Writes the date using the encoding associated with the version. */

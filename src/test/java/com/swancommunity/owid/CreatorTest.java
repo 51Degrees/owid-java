@@ -22,7 +22,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Collections;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /** Unit tests for the creator signing behaviour. */
@@ -90,8 +89,8 @@ class CreatorTest {
         Owid root = creator.signString("root");
         Owid party = new Owid();
         party.setPayload("party".getBytes());
-        creator.signWithOthers(party, List.of(root));
-        assertTrue(party.verifyWithCrypto(crypto, List.of(root)),
+        creator.signWithOthers(party, Collections.singletonList(root));
+        assertTrue(party.verifyWithCrypto(crypto, Collections.singletonList(root)),
                 "should verify with the same others");
         assertFalse(party.verifyWithCrypto(crypto, Collections.emptyList()),
                 "should fail to verify without the others");
