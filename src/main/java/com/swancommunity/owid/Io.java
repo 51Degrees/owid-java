@@ -39,6 +39,18 @@ final class Io {
      */
     static final long BASE_DATE_EPOCH_SECONDS = 1_577_836_800L;
 
+    /**
+     * The longest domain an OWID can hold, in characters. RFC 1035 section
+     * 2.3.4, "Size limits", restricts the total length of a domain name to
+     * 255 octets or less, and that limit counts the wire format, which
+     * spends one length octet on every label and one zero octet on the
+     * root. An OWID stores the presentation form instead, being the text
+     * "example.com", where the dots stand in for the label length octets
+     * and the root has no text at all, so the same published limit is two
+     * characters shorter here.
+     */
+    static final int MAXIMUM_DOMAIN_LENGTH = 253;
+
     private Io() {
     }
 
@@ -73,6 +85,11 @@ final class Io {
             return buffer[position++] & 0xFF;
         }
 
+        /**
+         * Copies the next count bytes. The end of the buffer is checked
+         * before the copy is sized, so a count beyond the bytes present is
+         * refused without allocating.
+         */
         private byte[] readBytes(int count) throws OwidException {
             if (count < 0) {
                 throw new OwidException("payload length is negative");
@@ -88,17 +105,27 @@ final class Io {
         }
 
         /**
-         * Reads bytes until the null terminator and returns them as a string.
+         * Reads the domain, being the bytes up to the null terminator. The
+         * search stops at {@link Io#MAXIMUM_DOMAIN_LENGTH} rather than at
+         * the end of the buffer, so a buffer whose terminator is missing or
+         * corrupted costs no more than the published maximum however long
+         * that buffer is, and a domain longer than the maximum is refused
+         * without reading past it.
          */
         String readString() throws OwidException {
+            long lastTerminator = (long) position + MAXIMUM_DOMAIN_LENGTH;
+            int limit = (int) Math.min(buffer.length - 1L, lastTerminator);
             int terminator = -1;
-            for (int i = position; i < buffer.length; i++) {
+            for (int i = position; i <= limit; i++) {
                 if (buffer[i] == 0) {
                     terminator = i;
                     break;
                 }
             }
             if (terminator < 0) {
+                if (lastTerminator < buffer.length) {
+                    throw domainTooLong();
+                }
                 throw endOfBuffer();
             }
             String value = new String(buffer, position, terminator - position,
@@ -109,22 +136,31 @@ final class Io {
 
         /** Reads an unsigned 32 bit integer in little endian byte order. */
         long readUInt32() throws OwidException {
-            byte[] bytes = readBytes(4);
-            return ((long) (bytes[0] & 0xFF))
-                    | ((long) (bytes[1] & 0xFF) << 8)
-                    | ((long) (bytes[2] & 0xFF) << 16)
-                    | ((long) (bytes[3] & 0xFF) << 24);
+            return ((long) readByte())
+                    | ((long) readByte() << 8)
+                    | ((long) readByte() << 16)
+                    | ((long) readByte() << 24);
         }
 
         /**
-         * Reads a byte array prefixed with its length as an unsigned 32 bit
-         * integer.
+         * Reads the length prefixed payload. The count is whatever the sender
+         * declared, so it is checked against the bytes actually present
+         * before anything is sized by it. A valid OWID is the declared
+         * payload followed by the signature and nothing else, so the count
+         * must equal the bytes remaining less the signature length, and any
+         * other count, short or long, is refused here. The same check refuses
+         * an envelope with bytes after the signature, which was previously
+         * accepted and ignored, and one whose signature is short.
          */
         byte[] readByteArray() throws OwidException {
             long count = readUInt32();
-            if (count > Integer.MAX_VALUE) {
-                throw new OwidException("payload length '" + count
-                        + "' exceeds the maximum supported length");
+            long remaining = (long) buffer.length - position;
+            long expected = count + Owid.SIGNATURE_LENGTH;
+            if (remaining != expected) {
+                throw new OwidException("OWID payload length '" + count
+                        + "' does not match the '" + remaining
+                        + "' bytes present, of which the final '"
+                        + Owid.SIGNATURE_LENGTH + "' must be the signature");
             }
             return readBytes((int) count);
         }
@@ -165,11 +201,18 @@ final class Io {
 
     /**
      * Writes the string followed by the null terminator. The string must not
-     * contain a null character as that would conflict with the terminator.
+     * contain a null character as that would conflict with the terminator,
+     * and must be no longer than {@link #MAXIMUM_DOMAIN_LENGTH} bytes, being
+     * the bound the read applies, so the library cannot write a domain it
+     * would then refuse to read back. The count is of the UTF-8 bytes
+     * because those are what the read counts as it walks to the terminator.
      */
     static void writeString(ByteArrayOutputStream buffer, String value)
             throws OwidException {
         byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > MAXIMUM_DOMAIN_LENGTH) {
+            throw domainTooLong();
+        }
         for (byte b : bytes) {
             if (b == 0) {
                 throw new OwidException("domain '" + value + "' is not valid");
@@ -236,6 +279,16 @@ final class Io {
                 throw new OwidException("OWID version '"
                         + (version.asByte() & 0xFF) + "' not supported");
         }
+    }
+
+    /**
+     * The refusal used by both halves of the library when a domain is longer
+     * than the published maximum, so the read and the write report the one
+     * condition in the same words.
+     */
+    static OwidException domainTooLong() {
+        return new OwidException("domain is longer than the '"
+                + MAXIMUM_DOMAIN_LENGTH + "' character maximum");
     }
 
     static OwidException invalidSignatureLength(int length) {

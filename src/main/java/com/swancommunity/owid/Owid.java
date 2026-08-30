@@ -38,11 +38,13 @@ import java.util.List;
  *
  * <ul>
  *   <li>version: a single byte.</li>
- *   <li>domain: the UTF-8 bytes of the domain, null terminated.</li>
+ *   <li>domain: the UTF-8 bytes of the domain, null terminated, no longer
+ *       than the maximum published for a domain name.</li>
  *   <li>date: four little endian bytes counting minutes since
  *       2020-01-01 UTC (two big endian bytes counting hours for version 1).</li>
  *   <li>payload: a four byte little endian length followed by the bytes.</li>
- *   <li>signature: 64 bytes, the r and s values concatenated.</li>
+ *   <li>signature: 64 bytes, the r and s values concatenated. Nothing
+ *       follows the signature.</li>
  * </ul>
  */
 public final class Owid {
@@ -106,8 +108,12 @@ public final class Owid {
      *
      * @param buffer the serialized OWID bytes
      * @return the parsed OWID
-     * @throws OwidException if the first byte is not a known version, or the
-     *                       buffer is too short for the remaining fields
+     * @throws OwidException if the first byte is not a known version, the
+     *                       buffer is too short for the remaining fields, the
+     *                       domain is unterminated or longer than the maximum
+     *                       published for a domain name, or the declared
+     *                       payload length does not leave exactly the 64 byte
+     *                       signature at the end
      */
     public static Owid fromByteArray(byte[] buffer) throws OwidException {
         return fromReader(new Io.Reader(buffer));
@@ -139,9 +145,10 @@ public final class Owid {
      *                       be encoded
      */
     public byte[] asByteArray() throws OwidException {
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        ExactByteArrayOutputStream buffer =
+                new ExactByteArrayOutputStream(byteCount(true));
         toBuffer(buffer);
-        return buffer.toByteArray();
+        return buffer.toExactByteArray();
     }
 
     /**
@@ -187,12 +194,82 @@ public final class Owid {
      * form of each of the others in the order provided.
      */
     byte[] dataForCrypto(List<Owid> others) throws OwidException {
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        int length = byteCount(false);
+        for (Owid other : others) {
+            length = addLength(length, other.byteCount(true));
+        }
+        ExactByteArrayOutputStream buffer =
+                new ExactByteArrayOutputStream(length);
         toBufferNoSignature(buffer);
         for (Owid other : others) {
             other.toBuffer(buffer);
         }
-        return buffer.toByteArray();
+        return buffer.toExactByteArray();
+    }
+
+    /**
+     * The exact number of bytes serialization will write.
+     */
+    private int byteCount(boolean includeSignature) throws OwidException {
+        int dateLength;
+        switch (version) {
+            case VERSION1:
+                dateLength = 2;
+                break;
+            case VERSION2:
+            case VERSION3:
+                dateLength = 4;
+                break;
+            default:
+                throw new OwidException(
+                        "OWID version '" + version + "' not supported");
+        }
+        int length = 1;
+        length = addLength(length,
+                domain.getBytes(StandardCharsets.UTF_8).length);
+        length = addLength(length, 1);
+        length = addLength(length, dateLength);
+        length = addLength(length, 4);
+        length = addLength(length, payload.length);
+        if (includeSignature) {
+            if (signature.length != SIGNATURE_LENGTH) {
+                throw Io.invalidSignatureLength(signature.length);
+            }
+            length = addLength(length, SIGNATURE_LENGTH);
+        }
+        return length;
+    }
+
+    /**
+     * Adds serialized lengths without allowing signed int overflow to turn
+     * an implementation capacity failure into a malformed OWID.
+     */
+    private static int addLength(int left, int right) throws OwidException {
+        if (right < 0 || left > Integer.MAX_VALUE - right) {
+            throw new OwidException(
+                    "OWID byte length exceeds Java array capacity");
+        }
+        return left + right;
+    }
+
+    /**
+     * A byte stream whose backing array is already the exact final size.
+     * Returning that array avoids ByteArrayOutputStream's final full copy.
+     */
+    private static final class ExactByteArrayOutputStream
+            extends ByteArrayOutputStream {
+
+        ExactByteArrayOutputStream(int size) {
+            super(size);
+        }
+
+        byte[] toExactByteArray() throws OwidException {
+            if (count != buf.length) {
+                throw new OwidException(
+                        "serialized OWID length did not match its fields");
+            }
+            return buf;
+        }
     }
 
     /**
@@ -335,6 +412,16 @@ public final class Owid {
      */
     public byte[] getPayload() {
         return payload.clone();
+    }
+
+    /**
+     * Returns the payload length without copying the payload. This is useful
+     * when applying a use-case-specific size policy after parsing.
+     *
+     * @return the payload length in bytes
+     */
+    public int getPayloadLength() {
+        return payload.length;
     }
 
     /**

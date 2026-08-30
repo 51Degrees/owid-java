@@ -44,16 +44,27 @@ public final class Creator {
      * Creates a new creator for the domain using the crypto instance for
      * signing.
      *
+     * <p>The domain is refused here if it is longer than the maximum
+     * published for a domain name, being the same bound parsing applies, so
+     * a creator can never be built that would produce an OWID this library
+     * would refuse to read. The refusal arrives when the caller supplies the
+     * domain rather than later when an OWID is signed.</p>
+     *
      * @param domain the domain associated with the creator
      * @param crypto the crypto instance that can sign
      * @return the creator
-     * @throws OwidException if the domain is empty or whitespace, or the
-     *                       crypto instance cannot sign
+     * @throws OwidException if the domain is empty or whitespace, is longer
+     *                       than the maximum published for a domain name, or
+     *                       the crypto instance cannot sign
      */
     public static Creator create(String domain, Crypto crypto)
             throws OwidException {
         if (domain == null || domain.trim().isEmpty()) {
             throw new OwidException("domain '" + domain + "' is not valid");
+        }
+        if (domain.getBytes(StandardCharsets.UTF_8).length
+                > Io.MAXIMUM_DOMAIN_LENGTH) {
+            throw Io.domainTooLong();
         }
         if (!crypto.canSign()) {
             throw new OwidException(
@@ -68,8 +79,9 @@ public final class Creator {
      * @param domain     the domain associated with the creator
      * @param privatePem the private key in PKCS#8 PEM form
      * @return the creator
-     * @throws OwidException if the domain is empty, or the PEM is not a valid
-     *                       private key
+     * @throws OwidException if the domain is empty or longer than the
+     *                       maximum published for a domain name, or the PEM
+     *                       is not a valid private key
      */
     public static Creator fromPrivatePem(String domain, String privatePem)
             throws OwidException {
