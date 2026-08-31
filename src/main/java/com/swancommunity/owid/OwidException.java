@@ -17,9 +17,16 @@
 package com.swancommunity.owid;
 
 /**
- * Checked exception thrown when creating, reading, signing, or verifying
+ * Checked exception raised when creating, serializing, signing or verifying
  * OWIDs fails. The message describes the cause and, where relevant, the
  * underlying exception is set as the cause.
+ *
+ * <p>Reading a serialized OWID does not raise this. Data that arrived from
+ * outside is expected to be malformed sometimes, so
+ * {@link Owid#parse(String)} and {@link Owid#parse(byte[])} report
+ * an {@link OwidParseStatus} instead. What remains here is the caller's own
+ * mistakes, such as an invalid creator domain or a field that cannot be
+ * serialized, and failures of the cryptography.</p>
  */
 public class OwidException extends Exception {
 

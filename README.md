@@ -36,15 +36,24 @@ creates, signs, serializes, and verifies OWIDs.
 
 The OWID wire format stores the payload length as an unsigned 32 bit value,
 so a payload from zero through 4,294,967,295 bytes is structurally valid. The
-format defines no smaller payload limit. The null-terminated domain has no
-separate encoded maximum, so the protocol alone is not an application input
-limit for the complete envelope.
+format defines no smaller payload limit. The null-terminated domain is capped
+at 253 characters, so that field is at most 254 bytes with its terminator,
+which leaves the payload as the only part of the envelope the protocol leaves
+open ended, so the protocol alone is not an application input limit for the
+complete envelope.
 
 This library validates that the declared payload length agrees with the bytes
 present before it sizes or copies the payload. A large declaration without
-the corresponding bytes is malformed and is rejected without allocating the
-declared size. A matching large payload is not malformed merely because it is
-large, and parsing work and memory use scale with the bytes actually present.
+the corresponding bytes is malformed, and is reported as
+`BYTE_COUNT_MISMATCH` on the whole buffer read, or as `UNEXPECTED_END` on the
+framed read, without allocating the declared size either way. A matching large
+payload is not malformed merely because it is large, and parsing work and
+memory use scale with the bytes actually present.
+
+The 253 character maximum binds this library on both sides. A buffer whose
+domain field runs past it is refused when it is read, and a domain longer than
+it is refused when a `Creator` is built and again when the domain is written,
+so the library will not emit an OWID that it would then refuse to read.
 
 The in-memory APIs remain subject to Java's signed `int` array indexing,
 address-space and available-memory limits, so a single Java byte array cannot
@@ -62,7 +71,8 @@ on behalf of the application.
 
 ## Installation
 
-Build and install with Maven. The project targets Java 21.
+Build and install with Maven. The library is compiled for Java 8, and the
+test suite runs on Java 8, 11, 17 and 21.
 
 ```
 mvn install
@@ -80,10 +90,15 @@ Then depend on it from another Maven project.
 
 ## Usage
 
+The example below is compiled and run by the test suite as
+`ReadmeExampleTest`, so a change to the library that would break it fails the
+build rather than leaving a documented example that no longer works.
+
 ```java
 import com.swancommunity.owid.Creator;
 import com.swancommunity.owid.Crypto;
 import com.swancommunity.owid.Owid;
+import com.swancommunity.owid.OwidParseResult;
 
 import java.util.Collections;
 
@@ -91,44 +106,199 @@ import java.util.Collections;
 Crypto crypto = Crypto.generate();
 Creator creator = Creator.create("example.com", crypto);
 
-// Create and sign an OWID with a payload.
-Owid owid = creator.signString("Hello World");
+// Create a signed OWID with a payload. An OWID is signed from the moment it
+// exists, so there is never an unsigned one to hold.
+Owid owid = creator.createString("Hello World");
 
 // Serialize to base 64 for storage or transmission.
 String encoded = owid.asBase64();
 
-// Later, or elsewhere, decode and verify with the public key.
-Owid copy = Owid.fromBase64(encoded);
-String publicPem = crypto.publicKeyPem();
-boolean valid = copy.verifyWithPublicKey(publicPem, Collections.emptyList());
+// Later, or elsewhere, read it back. Reading answers rather than throwing,
+// because whatever arrives from outside may not be an OWID at all.
+OwidParseResult result = Owid.parse(encoded);
+if (result.isSuccess()) {
+    Owid copy = result.getValue();
+    String publicPem = crypto.publicKeyPem();
+    boolean valid = copy.verifyWithPublicKey(
+        publicPem, Collections.<Owid>emptyList());
+} else {
+    // result.getStatus() names which of the expected problems it was, and
+    // result.getValue() is null.
+}
 ```
 
 Chaining covers other OWIDs with the same signature. The same others, in the
 same order, must be supplied when verifying as were supplied when signing.
 
 ```java
-Owid root = creator.signString("root");
-
-Owid party = new Owid();
-party.setPayload("party".getBytes());
-creator.signWithOthers(party, java.util.List.of(root));
+Owid root = creator.createString("root");
+Owid party = creator.createString("party", Collections.singletonList(root));
 
 // Verifies with the root as the single other, fails without it.
-party.verifyWithCrypto(crypto, java.util.List.of(root)); // true
-party.verifyWithCrypto(crypto, Collections.emptyList());  // false
+party.verifyWithCrypto(crypto, Collections.singletonList(root)); // true
+party.verifyWithCrypto(crypto, Collections.<Owid>emptyList());   // false
 ```
+
+## Reading, and why it does not throw
+
+An OWID is read from whatever a caller was handed, which on a public end
+point means anything at all, so malformed data is an ordinary outcome rather
+than an exceptional one. `Owid.parse`, overloaded on the encoded string, the
+raw bytes and a `ByteBuffer`, therefore reports three facts every time.
+
+| Fact | Where |
+|------|-------|
+| Whether it worked | `isSuccess()` |
+| The OWID, only when it worked | `getValue()`, null otherwise |
+| A named reason, either way | `getStatus()` |
+
+The statuses are the cross language vocabulary, so a failure means the same
+thing whichever language read the bytes.
+
+| Status | Meaning |
+|--------|---------|
+| `PARSED` | The bytes are a structurally valid OWID. |
+| `MISSING_INPUT` | Nothing was supplied to read. |
+| `INVALID_INPUT_TYPE` | Not reachable in Java, where the compiler already refuses anything that is not a string or a byte array. |
+| `INVALID_BASE64` | The string is not base 64, so there are no bytes to read. |
+| `UNSUPPORTED_VERSION` | The first byte names a version this library does not know. Version zero is known, and is `ABSENT_NODE` below. |
+| `UNEXPECTED_END` | The data stopped in the middle of a field. Reading a frame, this also covers a frame running past the bytes supplied. |
+| `INVALID_DOMAIN_ENCODING` | The domain is unterminated, or longer than the published maximum. |
+| `BYTE_COUNT_MISMATCH` | The declared payload count disagrees with the bytes present. Only the whole buffer read reports it. |
+| `IMPLEMENTATION_CAPACITY_EXCEEDED` | Larger than this runtime can hold. Not reachable from the byte array surface, because a Java array cannot exceed `Integer.MAX_VALUE` bytes and so can never agree with a larger declaration. |
+| `MALFORMED_ENVELOPE` | Malformed in a way none of the others describes. Nothing reaches it, because the byte count rule already refuses everything it would catch, and it is kept as a backstop so a later change to that arithmetic cannot start accepting bytes after the signature in silence. |
+| `ABSENT_NODE` | The bytes are the marker for an absent optional OWID, on both reading contracts. Not a fault and not an OWID, so no value is handed back. |
+
+Reading and verifying are separate questions, and reading fetches no key and
+performs no cryptography. Bytes that are a well formed OWID read successfully
+even when the signature does not match, and only `verify` then
+reports that it does not.
+
+`verify` returns an `OwidVerificationResult` and keeps "does not match"
+apart from "could not check", because
+a key that cannot be obtained or cannot be decoded leaves the signature
+unjudged, and reporting that as invalid would read as an attack rather than
+as the outage it is.
+
+| Status | Meaning |
+|--------|---------|
+| `SIGNATURE_VALID` | Genuine for this data and this key. |
+| `SIGNATURE_INVALID` | Well formed and does not match. The only status that means the identifier should be distrusted. |
+| `INVALID_SIGNATURE_LENGTH` | A signature field of the wrong length reached the check. A consumer cannot produce one, because reading and creation both settle the signature at 64 bytes. |
+| `KEY_UNAVAILABLE` | No key was supplied, or the one supplied cannot verify. |
+| `INVALID_KEY` | Key material arrived and cannot be decoded or used. |
+| `IMPLEMENTATION_CAPACITY_EXCEEDED` | More work than this runtime can hold, which needs an OWID and its chain to approach the two gigabyte limit of a Java array. |
+| `VERIFICATION_ERROR` | The check could not be completed for a reason that is not the identifier's fault. |
+
+## Reading one OWID out of something longer
+
+`Owid.parse(ByteBuffer)` is the framed read, for input that carries an OWID
+inside something longer, such as a tree of them or a record with other fields
+around it. It differs from the whole buffer read in one place. A whole buffer
+has to end where the envelope does, so a byte after the signature belongs to
+no field and is `BYTE_COUNT_MISMATCH`, whereas a frame only requires the
+declared payload and the signature to be present and says nothing about what
+follows, because what follows is the next frame rather than rubbish.
+
+```java
+ByteBuffer buffer = ByteBuffer.wrap(bytes);
+while (buffer.hasRemaining()) {
+    OwidParseResult result = Owid.parse(buffer);
+    if (result.isSuccess() == false) {
+        // buffer is still at the start of the frame that failed, and
+        // result.getStatus() says why.
+        break;
+    }
+    use(result.getValue());
+}
+```
+
+On success the buffer moves on to the first byte after the envelope, so
+calling `parse` again reads the next one, and `getByteCount()` on the result
+reports how far it moved. On failure the buffer is left exactly where it was
+and nothing is consumed, because a half read frame leaves a caller somewhere
+it cannot reason about, so what to do with a bad frame is the caller's to
+decide.
+
+`UNEXPECTED_END` from the framed read means the frame runs past the bytes
+supplied, so a caller reading from a source that is still arriving can wait
+for more and read again from the same position. That is the settled rule
+across every implementation rather than a choice this one made, because
+knowing whether to wait for more bytes or to give up on these is what a
+caller of a framed read most needs to be told.
+
+An absent node marker in the middle of a run of frames reports `ABSENT_NODE`
+and consumes its single byte, so the loop above steps over it and reads the
+frame after it. It hands back no OWID, because the marker carries no
+signature.
+
+Buffers that carry no array a caller may reach, being direct and read only
+ones, are read from a copy of what remains rather than in place. Callers
+wrapping an array, which is the ordinary case, are read without any copy.
+
+## How an OWID comes into being
+
+An OWID is only worth anything because it is signed, so a caller cannot build
+one. There is no public constructor and no setter, and an instance reaches
+calling code by exactly two routes.
+
+1. A successful read of a complete serialized OWID, through any `Owid.parse`
+   overload.
+2. A creator signing one into existence, through `createString` or
+   `createBytes`.
+
+An unsigned OWID is indistinguishable from a signed one to the code
+downstream of it, and the difference only surfaces later when a verification
+fails somewhere nobody is watching, which is why there is no way to obtain
+one. There is no public way to sign an OWID either, because with nothing
+unsigned to hold there is nothing outside to sign, and signing a parsed OWID
+again would replace the signature its fields were read with.
+
+The fields are read only for the same reason. The signature covers them as
+they arrived, so a caller changing one afterwards would hold something the
+signature no longer describes. `getPayload` and `getSignature` hand back
+copies, because a Java byte array is mutable.
+
+## Migrating from the earlier surface
+
+| Before | After |
+|--------|-------|
+| `Owid.fromBase64(value)` | `Owid.parse(value)` |
+| `Owid.fromByteArray(buffer)` | `Owid.parse(buffer)` |
+| `new Owid()`, then `setPayload`, then `creator.sign(owid)` | `creator.createBytes(payload)` |
+| `creator.signString(value)` | `creator.createString(value)` |
+| `creator.signBytes(value)` | `creator.createBytes(value)` |
+| `new Owid()`, then `creator.signWithOthers(owid, others)` | `creator.createBytes(payload, others)` |
+| `owid.setVersion`, `setDomain`, `setDate`, `setPayload` | no replacement, the state is read only |
+| `Version.fromByte(b)` | no replacement, an unknown version byte is `UNSUPPORTED_VERSION` from a read, and version zero is `ABSENT_NODE` |
+
+`Owid.parse` is overloaded on the input type, so a caller passing a literal
+`null` has to say which one it means, as in `Owid.parse((String) null)`. The
+same is true of `verify`.
+
+The parse surfaces do not throw for malformed data, so a caller that wrapped
+the old ones in `try`/`catch` reads the status instead. `OwidException` is
+still raised for the caller's own mistakes, such as an invalid creator
+domain, a null payload, or a field that cannot be serialized.
 
 ## Interface
 
 - `Owid` holds the version, domain, date to the minute in UTC, payload bytes,
-  and signature bytes.
-  - `Owid.fromBase64` and `Owid.fromByteArray` parse a signed OWID.
+  and signature bytes, all read only.
+  - `Owid.parse` reads a signed OWID, from the encoded string, from the raw
+    bytes, or from a `ByteBuffer` holding one frame of something longer, and
+    reports why rather than throwing. `getByteCount` on the result says how
+    many bytes the envelope occupied.
   - `asBase64` and `asByteArray` serialize a signed OWID.
   - `payloadAsString` decodes the payload as UTF-8. `payloadAsPrintable`
     returns zero padded lower case hexadecimal with no separator.
-    `payloadAsBase64` returns the payload as base 64.
+    `payloadAsBase64` returns the payload as base 64. `getPayloadLength`
+    reports the payload size without copying it.
   - `verifyWithCrypto` and `verifyWithPublicKey` return whether the signature,
     covering this OWID and any others provided, is valid.
+  - `verify`, taking either the `Crypto` or the public key PEM, answers the
+    same question with a status, keeping a key that could not be used apart
+    from a signature that does not match.
   - `ageMinutes` returns the minutes elapsed since creation.
 - `Crypto` holds the keys.
   - `Crypto.generate` creates a new P-256 key pair.
@@ -141,10 +311,10 @@ party.verifyWithCrypto(crypto, Collections.emptyList());  // false
   - An empty, whitespace, or null PEM is rejected with a clear message rather
     than an opaque cryptography error.
 - `Creator` binds a domain to a signing `Crypto`.
-  - `sign` and `signWithOthers` set the OWID domain to the creator domain, the
-    date to the current time, and the version to the current version, then
-    sign.
-  - `signString` and `signBytes` create and sign a new OWID.
+  - `createString` and `createBytes` create a complete signed OWID, setting
+    the domain to the creator domain, the date to the current time and the
+    version to the current version. Both take an optional list of other OWIDs
+    to cover with the same signature.
 - `Endpoints` provides framework agnostic helpers for the well known end
   points.
   - `creatorResponse` returns JSON with the fields `domain`, `name`,
@@ -177,11 +347,20 @@ ASN.1 DER. The data covered by the signature is this OWID without its
 signature, followed by the complete bytes, including signature, of each other
 OWID in the order provided when signing.
 
-An empty OWID is written as the single byte `0x00`. It marks an absent
-optional OWID inside a larger byte array.
+An absent optional OWID is written as the single byte `0x00`, which
+`Owid.emptyByteArray` produces, and it marks the absence of a node inside a
+larger framed byte array. Reading it reports `ABSENT_NODE` and hands back no
+OWID, because the marker carries no signature and returning one would put an
+OWID in a caller's hands that nothing had ever signed. It is not a fault
+either, since version zero is supported and what it means is that a node is
+missing. The first byte settles this on both reading contracts, because
+nothing after it can turn the value into an OWID. Read as a frame the marker
+is also consumed, so a caller steps over the absent node and reads the frame
+after it.
 
 Base 64 decoding accepts the standard alphabet with or without the trailing
-padding. Encoding always emits padding.
+padding, and skips line breaks and spaces. Anything else in the string is
+reported as `INVALID_BASE64`. Encoding always emits padding.
 
 ## Testing
 
@@ -193,8 +372,12 @@ mvn test
 
 The tests round trip the canonical wire format vectors byte for byte, verify
 cross language signed fixtures including the chained case, confirm that a
-flipped signature byte fails verification, and cover the binary read and write
-helpers, the crypto, the creator, and the end point helpers.
+flipped signature byte fails verification, and cover the binary write
+helpers, the crypto, the creator, and the end point helpers. They also cover
+the parse contract, being every status the reading surfaces report together
+with a run of malformed buffers that must never throw, the framed read and
+what it consumes, and the construction boundary, which is checked from a package outside the library because a check
+made from inside it would measure nothing.
 
 ## License
 

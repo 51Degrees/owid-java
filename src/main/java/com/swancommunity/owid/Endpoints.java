@@ -102,8 +102,11 @@ public final class Endpoints {
         if ("spki".equals(format) || "pkcs".equals(format)) {
             return creator.crypto().subjectPublicKeyInfo();
         }
-        throw new OwidException("format parameter 'spki' or 'pkcs' must be "
-                + "provided, received '" + format + "'");
+        // The value is not repeated back, because it arrives on a query
+        // string from whoever called the end point and a refusal is often
+        // logged.
+        throw new OwidException(
+                "format parameter 'spki' or 'pkcs' must be provided");
     }
 
     private static void appendField(StringBuilder json, String name,

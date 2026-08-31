@@ -18,12 +18,12 @@ package com.swancommunity.owid;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadMXBean;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
@@ -110,9 +110,9 @@ class PayloadLengthTest {
      * last 64 bytes, and the envelope parses to the same payload.
      */
     @Test
-    void declaredLengthMatchesParses() throws OwidException {
-        Owid owid = Owid.fromByteArray(
-                envelope(PAYLOAD.length, PAYLOAD, SIGNATURE));
+    void declaredLengthMatchesParses() {
+        Owid owid = ParseAssert.parsed(Owid.parse(
+                envelope(PAYLOAD.length, PAYLOAD, SIGNATURE)));
         assertArrayEquals(PAYLOAD, owid.getPayload(),
                 "should read the payload back unchanged");
         assertArrayEquals(SIGNATURE, owid.getSignature(),
@@ -126,11 +126,11 @@ class PayloadLengthTest {
      * application rather than format parsing.
      */
     @Test
-    void matchingOneMebibytePayloadParses() throws OwidException {
+    void matchingOneMebibytePayloadParses() {
         byte[] payload = filled(1024 * 1024, (byte) 0x5A);
 
-        Owid owid = Owid.fromByteArray(
-                envelope(payload.length, payload, SIGNATURE));
+        Owid owid = ParseAssert.parsed(Owid.parse(
+                envelope(payload.length, payload, SIGNATURE)));
 
         assertEquals(payload.length, owid.getPayloadLength());
         assertArrayEquals(payload, owid.getPayload());
@@ -145,8 +145,9 @@ class PayloadLengthTest {
     void libraryOutputParses() throws OwidException {
         Crypto crypto = Crypto.generate();
         Creator creator = Creator.create(DOMAIN, crypto);
-        Owid original = creator.signBytes(PAYLOAD);
-        Owid parsed = Owid.fromByteArray(original.asByteArray());
+        Owid original = creator.createBytes(PAYLOAD);
+        Owid parsed = ParseAssert.parsed(
+                Owid.parse(original.asByteArray()));
         assertArrayEquals(PAYLOAD, parsed.getPayload(),
                 "should read the payload the library wrote");
         assertEquals(original, parsed, "should parse to an equal OWID");
@@ -163,8 +164,8 @@ class PayloadLengthTest {
         int[] declaredLengths = {PAYLOAD.length - 1, PAYLOAD.length + 1};
         for (int declared : declaredLengths) {
             byte[] bytes = envelope(declared, PAYLOAD, SIGNATURE);
-            assertThrows(OwidException.class, () -> Owid.fromByteArray(bytes),
-                    "should refuse a declared length of " + declared);
+            ParseAssert.failed(Owid.parse(bytes),
+                    OwidParseStatus.BYTE_COUNT_MISMATCH);
         }
     }
 
@@ -176,20 +177,23 @@ class PayloadLengthTest {
     void trailingByteAfterSignatureRefused() {
         byte[] bytes = envelope(PAYLOAD.length, PAYLOAD, SIGNATURE);
         byte[] longer = Arrays.copyOf(bytes, bytes.length + 1);
-        assertThrows(OwidException.class, () -> Owid.fromByteArray(longer),
-                "should refuse a byte after the signature");
+        ParseAssert.failed(Owid.parse(longer),
+                OwidParseStatus.BYTE_COUNT_MISMATCH);
     }
 
     /**
-     * A short signature is refused. The declared payload length is right
-     * for the payload, but the bytes after it are fewer than a signature.
+     * A short signature is refused as a byte count disagreement. The declared
+     * payload length is right for the payload, but the bytes after it are
+     * fewer than a signature, and what the reader can say for certain is that
+     * the declared payload cannot leave exactly the 64 bytes the version
+     * requires.
      */
     @Test
     void shortSignatureRefused() {
         byte[] bytes = envelope(PAYLOAD.length, PAYLOAD,
                 filled(SIGNATURE_LENGTH - 1, (byte) 0x99));
-        assertThrows(OwidException.class, () -> Owid.fromByteArray(bytes),
-                "should refuse a 63 byte signature");
+        ParseAssert.failed(Owid.parse(bytes),
+                OwidParseStatus.BYTE_COUNT_MISMATCH);
     }
 
     /**
@@ -211,11 +215,24 @@ class PayloadLengthTest {
         for (long declared : declaredLengths) {
             byte[] bytes = envelope(declared, new byte[0], new byte[0]);
             long before = allocatedBytes();
-            assertThrows(OwidException.class, () -> Owid.fromByteArray(bytes),
-                    "should refuse a declared length of " + declared);
+            OwidParseResult result = Owid.parse(bytes);
             long allocated = allocatedBytes() - before;
+            ParseAssert.failed(result, OwidParseStatus.BYTE_COUNT_MISMATCH);
             assertTrue(allocated < ALLOCATION_BOUND, "declared " + declared
                     + " allocated " + allocated + " bytes");
+
+            // The framed read is handed the same claim, since it sizes the
+            // payload from the declaration too and a sender picks the number
+            // there as well.
+            ByteBuffer framed = ByteBuffer.wrap(bytes);
+            before = allocatedBytes();
+            OwidParseResult framedResult = Owid.parse(framed);
+            allocated = allocatedBytes() - before;
+            ParseAssert.failed(framedResult, OwidParseStatus.UNEXPECTED_END);
+            assertTrue(allocated < ALLOCATION_BOUND, "framed declared "
+                    + declared + " allocated " + allocated + " bytes");
+            assertEquals(0, framed.position(),
+                    "a refused frame should consume nothing");
         }
     }
 
@@ -225,8 +242,9 @@ class PayloadLengthTest {
      * valid envelope.
      */
     @Test
-    void emptyPayloadParses() throws OwidException {
-        Owid owid = Owid.fromByteArray(envelope(0, new byte[0], SIGNATURE));
+    void emptyPayloadParses() {
+        Owid owid = ParseAssert.parsed(
+                Owid.parse(envelope(0, new byte[0], SIGNATURE)));
         assertEquals(0, owid.getPayload().length,
                 "should read an empty payload");
         assertArrayEquals(SIGNATURE, owid.getSignature(),

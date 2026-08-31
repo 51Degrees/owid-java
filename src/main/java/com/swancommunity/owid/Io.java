@@ -22,10 +22,14 @@ import java.time.Duration;
 import java.time.Instant;
 
 /**
- * Low level read and write helpers for the OWID binary format. The format
- * uses little endian unsigned 32 bit integers, null terminated strings, and a
- * fixed 64 byte signature. Version 1 stores the date as a two byte big endian
- * count of hours.
+ * Low level write helpers, and the constants both halves of the library
+ * share, for the OWID binary format. The format uses little endian unsigned
+ * 32 bit integers, null terminated strings, and a fixed 64 byte signature.
+ * Version 1 stores the date as a two byte big endian count of hours.
+ *
+ * <p>Reading lives in {@link OwidReader}, which walks a buffer by index and
+ * reports why rather than throwing, because the bytes it reads come from
+ * outside.</p>
  *
  * <p>The class is not part of the public API. The methods are package private
  * so that the unit tests can exercise them directly.</p>
@@ -61,138 +65,6 @@ final class Io {
      */
     static Instant baseDate() {
         return Instant.ofEpochSecond(BASE_DATE_EPOCH_SECONDS);
-    }
-
-    /** Sequential reader over a byte buffer. */
-    static final class Reader {
-
-        private final byte[] buffer;
-        private int position;
-
-        Reader(byte[] buffer) {
-            this.buffer = buffer;
-            this.position = 0;
-        }
-
-        int position() {
-            return position;
-        }
-
-        int readByte() throws OwidException {
-            if (position >= buffer.length) {
-                throw endOfBuffer();
-            }
-            return buffer[position++] & 0xFF;
-        }
-
-        /**
-         * Copies the next count bytes. The end of the buffer is checked
-         * before the copy is sized, so a count beyond the bytes present is
-         * refused without allocating.
-         */
-        private byte[] readBytes(int count) throws OwidException {
-            if (count < 0) {
-                throw new OwidException("payload length is negative");
-            }
-            long end = (long) position + count;
-            if (end > buffer.length) {
-                throw endOfBuffer();
-            }
-            byte[] value = new byte[count];
-            System.arraycopy(buffer, position, value, 0, count);
-            position += count;
-            return value;
-        }
-
-        /**
-         * Reads the domain, being the bytes up to the null terminator. The
-         * search stops at {@link Io#MAXIMUM_DOMAIN_LENGTH} rather than at
-         * the end of the buffer, so a buffer whose terminator is missing or
-         * corrupted costs no more than the published maximum however long
-         * that buffer is, and a domain longer than the maximum is refused
-         * without reading past it.
-         */
-        String readString() throws OwidException {
-            long lastTerminator = (long) position + MAXIMUM_DOMAIN_LENGTH;
-            int limit = (int) Math.min(buffer.length - 1L, lastTerminator);
-            int terminator = -1;
-            for (int i = position; i <= limit; i++) {
-                if (buffer[i] == 0) {
-                    terminator = i;
-                    break;
-                }
-            }
-            if (terminator < 0) {
-                if (lastTerminator < buffer.length) {
-                    throw domainTooLong();
-                }
-                throw endOfBuffer();
-            }
-            String value = new String(buffer, position, terminator - position,
-                    StandardCharsets.UTF_8);
-            position = terminator + 1;
-            return value;
-        }
-
-        /** Reads an unsigned 32 bit integer in little endian byte order. */
-        long readUInt32() throws OwidException {
-            return ((long) readByte())
-                    | ((long) readByte() << 8)
-                    | ((long) readByte() << 16)
-                    | ((long) readByte() << 24);
-        }
-
-        /**
-         * Reads the length prefixed payload. The count is whatever the sender
-         * declared, so it is checked against the bytes actually present
-         * before anything is sized by it. A valid OWID is the declared
-         * payload followed by the signature and nothing else, so the count
-         * must equal the bytes remaining less the signature length, and any
-         * other count, short or long, is refused here. The same check refuses
-         * an envelope with bytes after the signature, which was previously
-         * accepted and ignored, and one whose signature is short.
-         */
-        byte[] readByteArray() throws OwidException {
-            long count = readUInt32();
-            long remaining = (long) buffer.length - position;
-            long expected = count + Owid.SIGNATURE_LENGTH;
-            if (remaining != expected) {
-                throw new OwidException("OWID payload length '" + count
-                        + "' does not match the '" + remaining
-                        + "' bytes present, of which the final '"
-                        + Owid.SIGNATURE_LENGTH + "' must be the signature");
-            }
-            return readBytes((int) count);
-        }
-
-        /** Reads the fixed length signature. */
-        byte[] readSignature() throws OwidException {
-            return readBytes(Owid.SIGNATURE_LENGTH);
-        }
-
-        /** Reads the date using the encoding associated with the version. */
-        Instant readDate(Version version) throws OwidException {
-            switch (version) {
-                case VERSION1: {
-                    int high = readByte();
-                    int low = readByte();
-                    long hours = ((long) high << 8) | low;
-                    return baseDate().plus(Duration.ofHours(hours));
-                }
-                case VERSION2:
-                case VERSION3: {
-                    long minutes = readUInt32();
-                    return baseDate().plus(Duration.ofMinutes(minutes));
-                }
-                default:
-                    throw new OwidException("OWID version '"
-                            + (version.asByte() & 0xFF) + "' not supported");
-            }
-        }
-
-        private static OwidException endOfBuffer() {
-            return new OwidException("buffer ended before the OWID was complete");
-        }
     }
 
     static void writeByte(ByteArrayOutputStream buffer, byte value) {

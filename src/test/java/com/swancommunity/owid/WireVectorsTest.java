@@ -54,10 +54,24 @@ class WireVectorsTest {
         return Base64.getMimeDecoder().decode(value);
     }
 
+    /**
+     * Each vector also reads straight from its unpadded base 64 form, so the
+     * library's own decoder is shown to accept what the vectors carry.
+     */
+    @Test
+    void vectorsReadFromUnpaddedBase64() {
+        for (String vector : new String[] {CREATOR, SUPPLIER, BAD}) {
+            Owid owid = ParseAssert.parsed(Owid.parse(vector));
+            assertArrayEquals(decode(vector),
+                    assertDoesNotThrow(owid::asByteArray),
+                    "should read the same bytes from the encoded form");
+        }
+    }
+
     @Test
     void creatorRoundTripsByteExact() throws OwidException {
         byte[] original = decode(CREATOR);
-        Owid owid = Owid.fromByteArray(original);
+        Owid owid = ParseAssert.parsed(Owid.parse(original));
         assertEquals("51db.uk", owid.getDomain(), "should read the domain");
         assertEquals(Version.VERSION2, owid.getVersion(),
                 "should read version 2");
@@ -70,7 +84,7 @@ class WireVectorsTest {
     @Test
     void supplierRoundTripsByteExact() throws OwidException {
         byte[] original = decode(SUPPLIER);
-        Owid owid = Owid.fromByteArray(original);
+        Owid owid = ParseAssert.parsed(Owid.parse(original));
         assertEquals("pop-up.swan-demo.uk", owid.getDomain(),
                 "should read the domain");
         assertArrayEquals(new byte[] {0x01, 0x03}, owid.getPayload(),
@@ -86,8 +100,7 @@ class WireVectorsTest {
     @Test
     void badParsesAndRoundTrips() throws OwidException {
         byte[] original = decode(BAD);
-        Owid owid = assertDoesNotThrow(() -> Owid.fromByteArray(original),
-                "the bad fixture should still parse");
+        Owid owid = ParseAssert.parsed(Owid.parse(original));
         assertEquals("badssp.swan-demo.uk", owid.getDomain(),
                 "should read the domain");
         assertArrayEquals(original, owid.asByteArray(),

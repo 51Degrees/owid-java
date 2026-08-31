@@ -140,7 +140,7 @@ class DomainLengthTest {
         String domain = domainOfLength(MAXIMUM);
         byte[] bytes = envelope(ascii(domain));
 
-        Owid owid = Owid.fromByteArray(bytes);
+        Owid owid = ParseAssert.parsed(Owid.parse(bytes));
 
         assertEquals(MAXIMUM, owid.getDomain().length(),
                 "should read a domain of the published maximum length");
@@ -149,7 +149,8 @@ class DomainLengthTest {
                 "should read the payload that follows the domain");
         assertArrayEquals(bytes, owid.asByteArray(),
                 "should write the same bytes back out");
-        assertEquals(owid, Owid.fromByteArray(owid.asByteArray()),
+        assertEquals(owid,
+                ParseAssert.parsed(Owid.parse(owid.asByteArray())),
                 "should parse its own output to an equal OWID");
     }
 
@@ -161,8 +162,8 @@ class DomainLengthTest {
     void overMaximumLengthDomainRefused() {
         byte[] bytes = envelope(ascii(domainOfLength(MAXIMUM + 1)));
 
-        assertThrows(OwidException.class, () -> Owid.fromByteArray(bytes),
-                "should refuse a domain one character over the maximum");
+        ParseAssert.failed(Owid.parse(bytes),
+                OwidParseStatus.INVALID_DOMAIN_ENCODING);
     }
 
     /**
@@ -175,8 +176,8 @@ class DomainLengthTest {
         byte[] bytes = filled(64 * 1024, (byte) 'a');
         bytes[0] = Version.VERSION3.asByte();
 
-        assertThrows(OwidException.class, () -> Owid.fromByteArray(bytes),
-                "should refuse a buffer with no terminator");
+        ParseAssert.failed(Owid.parse(bytes),
+                OwidParseStatus.INVALID_DOMAIN_ENCODING);
     }
 
     /**
@@ -191,10 +192,9 @@ class DomainLengthTest {
         byte[] bytes = envelope(filled(HOSTILE_DOMAIN_LENGTH, (byte) 'a'));
 
         long before = allocatedBytes();
-        assertThrows(OwidException.class, () -> Owid.fromByteArray(bytes),
-                "should refuse a domain field of "
-                        + HOSTILE_DOMAIN_LENGTH + " bytes");
+        OwidParseResult result = Owid.parse(bytes);
         long allocated = allocatedBytes() - before;
+        ParseAssert.failed(result, OwidParseStatus.INVALID_DOMAIN_ENCODING);
 
         assertTrue(allocated < ALLOCATION_BOUND, "refusing a "
                 + HOSTILE_DOMAIN_LENGTH + " byte domain field allocated "
@@ -212,8 +212,9 @@ class DomainLengthTest {
         Crypto crypto = Crypto.generate();
         Creator creator = Creator.create(domain, crypto);
 
-        Owid signed = creator.signBytes(PAYLOAD);
-        Owid parsed = Owid.fromByteArray(signed.asByteArray());
+        Owid signed = creator.createBytes(PAYLOAD);
+        Owid parsed = ParseAssert.parsed(
+                Owid.parse(signed.asByteArray()));
 
         assertEquals(MAXIMUM, parsed.getDomain().length(),
                 "should write and read a domain of the published maximum");
@@ -243,9 +244,7 @@ class DomainLengthTest {
     /**
      * The refusal comes before anything is signed. A creator cannot be built
      * with an over long domain even when the crypto instance holds no private
-     * key at all, and a domain that reaches an OWID by another route is
-     * refused as the bytes to sign are assembled, which is the step before
-     * the private key is used, leaving the OWID with no signature.
+     * key at all, so the private key is never reached.
      */
     @Test
     void overMaximumLengthDomainRefusedBeforeSigning() throws OwidException {
@@ -259,16 +258,25 @@ class DomainLengthTest {
                 () -> Creator.create(domain, verifyOnly),
                 "should refuse the domain without reaching the crypto");
         assertNamesMaximum(fromCreator);
+    }
 
-        Owid owid = new Owid();
-        owid.setDomain(domain);
-        owid.setPayload(PAYLOAD);
-        OwidException fromData = assertThrows(OwidException.class,
-                () -> owid.dataForCrypto(Collections.emptyList()),
+    /**
+     * Assembling the bytes that would be signed refuses a domain over the
+     * maximum however it arrived. Only the library itself can reach this,
+     * because a caller cannot build an OWID with a domain of its own
+     * choosing, so the test asks the library directly.
+     */
+    @Test
+    void overMaximumLengthDomainRefusedWhenAssemblingDataToSign() {
+        String domain = domainOfLength(MAXIMUM + 1);
+
+        OwidException thrown = assertThrows(OwidException.class,
+                () -> Owid.dataForCrypto(Version.current(), domain,
+                        Io.baseDate(), PAYLOAD,
+                        Collections.<Owid>emptyList()),
                 "should refuse to assemble the bytes that would be signed");
-        assertNamesMaximum(fromData);
-        assertEquals(0, owid.getSignature().length,
-                "nothing should have been signed");
+
+        assertNamesMaximum(thrown);
     }
 
     /**
@@ -278,10 +286,8 @@ class DomainLengthTest {
      */
     @Test
     void overMaximumLengthDomainRefusedWhenSerialising() {
-        Owid owid = new Owid();
-        owid.setDomain(domainOfLength(MAXIMUM + 1));
-        owid.setPayload(PAYLOAD);
-        owid.setSignature(SIGNATURE);
+        Owid owid = new Owid(Version.current(), domainOfLength(MAXIMUM + 1),
+                Io.baseDate(), PAYLOAD, SIGNATURE);
 
         OwidException thrown = assertThrows(OwidException.class,
                 owid::asByteArray,
@@ -306,9 +312,10 @@ class DomainLengthTest {
     void libraryOutputParses() throws OwidException {
         Crypto crypto = Crypto.generate();
         Creator creator = Creator.create("51d.es", crypto);
-        Owid original = creator.signBytes(PAYLOAD);
+        Owid original = creator.createBytes(PAYLOAD);
 
-        Owid parsed = Owid.fromByteArray(original.asByteArray());
+        Owid parsed = ParseAssert.parsed(
+                Owid.parse(original.asByteArray()));
 
         assertEquals("51d.es", parsed.getDomain(),
                 "should read the domain the library wrote");
