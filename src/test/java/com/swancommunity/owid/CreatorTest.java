@@ -16,6 +16,7 @@
 
 package com.swancommunity.owid;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -48,7 +49,7 @@ class CreatorTest {
     void signSetsDomainVersionAndVerifies() throws OwidException {
         Crypto crypto = Crypto.generate();
         Creator creator = Creator.create("example.com", crypto);
-        Owid owid = creator.signString("Hello World");
+        Owid owid = creator.createString("Hello World");
         assertEquals("example.com", owid.getDomain(),
                 "should set the creator domain");
         assertEquals(Version.VERSION3, owid.getVersion(),
@@ -63,9 +64,9 @@ class CreatorTest {
     void signAndSelfVerifyThroughPem() throws OwidException {
         Crypto crypto = Crypto.generate();
         Creator creator = Creator.create("example.com", crypto);
-        Owid owid = creator.signString("payload");
+        Owid owid = creator.createString("payload");
         String encoded = owid.asBase64();
-        Owid copy = Owid.fromBase64(encoded);
+        Owid copy = ParseAssert.parsed(Owid.parse(encoded));
         assertTrue(copy.verifyWithPublicKey(crypto.publicKeyPem(),
                 Collections.emptyList()), "the decoded OWID should verify");
     }
@@ -74,26 +75,63 @@ class CreatorTest {
     void tamperedSignedOwidFails() throws OwidException {
         Crypto crypto = Crypto.generate();
         Creator creator = Creator.create("example.com", crypto);
-        Owid owid = creator.signBytes(new byte[] {1, 2, 3});
+        Owid owid = creator.createBytes(new byte[] {1, 2, 3});
         byte[] bytes = owid.asByteArray();
         bytes[bytes.length - 1] ^= 0x01;
-        Owid tampered = Owid.fromByteArray(bytes);
+        Owid tampered = ParseAssert.parsed(Owid.parse(bytes));
         assertFalse(tampered.verifyWithCrypto(crypto, Collections.emptyList()),
                 "a tampered signature should not verify");
     }
 
     @Test
-    void signWithOthersRoundTrips() throws OwidException {
+    void createWithOthersRoundTrips() throws OwidException {
         Crypto crypto = Crypto.generate();
         Creator creator = Creator.create("example.com", crypto);
-        Owid root = creator.signString("root");
-        Owid party = new Owid();
-        party.setPayload("party".getBytes());
-        creator.signWithOthers(party, Collections.singletonList(root));
-        assertTrue(party.verifyWithCrypto(crypto, Collections.singletonList(root)),
+        Owid root = creator.createString("root");
+        Owid party = creator.createString(
+                "party", Collections.singletonList(root));
+        assertTrue(
+                party.verifyWithCrypto(
+                        crypto, Collections.singletonList(root)),
                 "should verify with the same others");
         assertFalse(party.verifyWithCrypto(crypto, Collections.emptyList()),
                 "should fail to verify without the others");
+    }
+
+    /**
+     * A creator refuses a null payload rather than producing an OWID with
+     * nothing in it. This is a caller mistake in code rather than data that
+     * arrived from outside, so it stays an exception.
+     */
+    @Test
+    void nullPayloadRefused() throws OwidException {
+        Crypto crypto = Crypto.generate();
+        Creator creator = Creator.create("example.com", crypto);
+        assertThrows(OwidException.class,
+                () -> creator.createBytes((byte[]) null),
+                "should refuse a null payload");
+        assertThrows(OwidException.class,
+                () -> creator.createString((String) null),
+                "should refuse a null payload string");
+    }
+
+    /**
+     * The payload the creator was handed is copied, so a caller writing into
+     * the array afterwards cannot change the OWID the signature covers.
+     */
+    @Test
+    void payloadHandedToCreatorIsCopied() throws OwidException {
+        Crypto crypto = Crypto.generate();
+        Creator creator = Creator.create("example.com", crypto);
+        byte[] payload = {1, 2, 3};
+
+        Owid owid = creator.createBytes(payload);
+        payload[0] = 99;
+
+        assertArrayEquals(new byte[] {1, 2, 3}, owid.getPayload(),
+                "the OWID should keep the bytes it was signed over");
+        assertTrue(owid.verifyWithCrypto(crypto, Collections.emptyList()),
+                "the OWID should still verify");
     }
 
     @Test
@@ -101,7 +139,7 @@ class CreatorTest {
         Crypto crypto = Crypto.generate();
         Creator creator = Creator.fromPrivatePem("example.com",
                 crypto.privateKeyPem());
-        Owid owid = creator.signString("data");
+        Owid owid = creator.createString("data");
         assertTrue(owid.verifyWithCrypto(crypto, Collections.emptyList()),
                 "should sign with the imported key");
     }

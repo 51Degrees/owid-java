@@ -26,7 +26,16 @@ package com.swancommunity.owid;
  */
 public enum Version {
 
-    /** Marker used to indicate an optional OWID that is not present. */
+    /**
+     * Marker used to indicate an optional OWID that is not present, inside a
+     * larger framed byte array.
+     *
+     * <p>No OWID carries this version, so reading the marker hands back no
+     * value and reports {@link OwidParseStatus#ABSENT_NODE}, being the
+     * absence of a node rather than a fault. Reading one frame out of
+     * something longer the marker is consumed, so a caller steps over the
+     * absent node and reads the frame after it.</p>
+     */
     EMPTY(0),
 
     /**
@@ -70,19 +79,19 @@ public enum Version {
     }
 
     /**
-     * Maps a byte to the matching version.
-     *
-     * @param value the version byte
-     * @return the matching version
-     * @throws OwidException if the byte is not a known version
+     * Maps a byte to the matching version, or null when the byte is not a
+     * known version. Reading a version the implementation does not know is
+     * an ordinary outcome for data that arrived from outside, so it is
+     * answered rather than thrown, and the caller reports it as
+     * {@link OwidParseStatus#UNSUPPORTED_VERSION}.
      */
-    public static Version fromByte(int value) throws OwidException {
+    static Version forByte(int value) {
         int unsigned = value & 0xFF;
         for (Version version : values()) {
             if (version.value == unsigned) {
                 return version;
             }
         }
-        throw new OwidException("OWID version '" + unsigned + "' not supported");
+        return null;
     }
 }
