@@ -24,9 +24,16 @@ import com.swancommunity.owid.Creator;
 import com.swancommunity.owid.Crypto;
 import com.swancommunity.owid.Owid;
 import com.swancommunity.owid.OwidException;
+import com.swancommunity.owid.DatedPublicKey;
 import com.swancommunity.owid.OwidParseResult;
+import com.swancommunity.owid.OwidSignatureStatus;
+import com.swancommunity.owid.OwidVerificationResult;
+import com.swancommunity.owid.PublicKeyFetch;
+import com.swancommunity.owid.PublicKeySchedule;
 import java.nio.ByteBuffer;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -130,5 +137,60 @@ class ReadmeExampleTest {
         assertFalse(
                 party.verifyWithCrypto(crypto, Collections.<Owid>emptyList()),
                 "should fail to verify without the others");
+    }
+
+    /**
+     * The schedule example from the README, choosing between two weekly keys
+     * by the date the identifier carries.
+     */
+    @Test
+    void aScheduleChoosesTheKeyThatWasInForce() throws OwidException {
+        Crypto lastWeek = Crypto.generate();
+        Crypto thisWeek = Crypto.generate();
+        String lastWeekPem = lastWeek.publicKeyPem();
+        String thisWeekPem = thisWeek.publicKeyPem();
+        Owid owid = Creator.create("example.com", thisWeek)
+                .createString("signed this week");
+
+        PublicKeySchedule schedule = PublicKeySchedule.of(Arrays.asList(
+                DatedPublicKey.of(
+                        Instant.parse("2026-08-24T00:00:00Z"), lastWeekPem),
+                DatedPublicKey.of(
+                        Instant.parse("2026-08-31T00:00:00Z"), thisWeekPem)));
+        OwidVerificationResult result = schedule.verify(
+                owid, Collections.<Owid>emptyList());
+
+        assertEquals(OwidSignatureStatus.SIGNATURE_VALID, result.getStatus(),
+                "should choose the key that was in force and verify");
+        assertTrue(result.isValid(), "the signature was examined and matched");
+    }
+
+    /**
+     * The fetch example from the README. The creator domain used here is in
+     * the reserved {@code .invalid} name space so that the test never reaches
+     * the network of whoever is running it, which shows the shape of the call
+     * and the status a key that cannot be obtained produces. The case where
+     * the key does arrive and the identifier verifies is covered by
+     * {@code DatedKeyFetchTest}, which stands up a key end point on the
+     * loopback address serving the real published schedule.
+     */
+    @Test
+    void fetchingTheKeyFromTheCreatorDomain() throws OwidException {
+        Owid owid = Creator.create("owid.invalid", Crypto.generate())
+                .createString("signed by a creator that cannot be reached");
+
+        OwidVerificationResult result = PublicKeyFetch.verify(
+                owid, "https", Collections.<Owid>emptyList());
+        if (result.getStatus() == OwidSignatureStatus.KEY_UNAVAILABLE) {
+            // The key could not be obtained, so the signature was never
+            // examined. Only SIGNATURE_INVALID means the identifier should
+            // be distrusted.
+            assertFalse(result.isValid(),
+                    "a signature that was never examined is not valid");
+        }
+
+        assertEquals(OwidSignatureStatus.KEY_UNAVAILABLE, result.getStatus(),
+                "a domain that cannot be reached leaves the signature "
+                        + "unjudged");
     }
 }

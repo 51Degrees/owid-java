@@ -67,6 +67,27 @@ final class Io {
         return Instant.ofEpochSecond(BASE_DATE_EPOCH_SECONDS);
     }
 
+    /**
+     * Returns the whole minutes elapsed from the base date to the date
+     * given, or -1 where the count is outside the range the wire format can
+     * hold, being a date before the base date or one beyond the unsigned 32
+     * bit maximum.
+     *
+     * <p>The dated public key end point picks the key that was in force by
+     * this same count, so a fetch and a write agree on what a date means
+     * without either repeating the arithmetic.</p>
+     *
+     * @param date the date to count from the base date
+     * @return the minutes elapsed, or -1 when the date cannot be counted
+     */
+    static long minutesSinceBase(Instant date) {
+        long minutes = Duration.between(baseDate(), date).toMinutes();
+        if (minutes < 0 || minutes > 0xFFFFFFFFL) {
+            return -1;
+        }
+        return minutes;
+    }
+
     static void writeByte(ByteArrayOutputStream buffer, byte value) {
         buffer.write(value);
     }
@@ -140,8 +161,8 @@ final class Io {
             }
             case VERSION2:
             case VERSION3: {
-                long minutes = Duration.between(baseDate(), date).toMinutes();
-                if (minutes < 0 || minutes > 0xFFFFFFFFL) {
+                long minutes = minutesSinceBase(date);
+                if (minutes < 0) {
                     throw dateOutOfRange();
                 }
                 writeUInt32(buffer, minutes);
