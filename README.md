@@ -31,6 +31,9 @@ creates, signs, serializes, and verifies OWIDs.
 - Public keys are imported from Subject Public Key Info ("PUBLIC KEY") PEM.
 - The well known end point helpers return paths and bodies. They do not bind
   to any web framework.
+- Fetching the public key of another creator uses `HttpURLConnection` from
+  the JDK, so verifying over the network adds no dependency and still runs on
+  Java 8.
 
 ## Payload size and application limits
 
@@ -138,6 +141,71 @@ Owid party = creator.createString("party", Collections.singletonList(root));
 party.verifyWithCrypto(crypto, Collections.singletonList(root)); // true
 party.verifyWithCrypto(crypto, Collections.<Owid>emptyList());   // false
 ```
+
+## Verifying an identifier signed in an earlier week
+
+Creators rotate their signing key, weekly in the case of the 51Degrees cloud,
+so the key that is current when an identifier is checked is not the key that
+signed the identifier unless the check happens in the same week. Verifying
+anything older than a few days means asking for the key that was in force on
+the date the identifier carries.
+
+`PublicKeyFetch` asks the creator for that key. The request is
+`/owid/api/v{n}/public-key?date={minutes}&format=pkcs`, where the version in
+the path is the version byte of the identifier being checked and the minutes
+are counted from 2020-01-01 in the same way the identifier stores its date. A
+creator that ignores the parameter returns its current key, so every
+identifier it signed under an earlier key reads as not matching, which is why
+a creator that rotates its key has to honour the date. Keys already fetched
+are held against the URL they came from, which names the domain, the version
+and the minute, up to 1024 of them before the store is emptied, and
+`clearCache` empties it on demand.
+
+```java
+import com.swancommunity.owid.OwidSignatureStatus;
+import com.swancommunity.owid.OwidVerificationResult;
+import com.swancommunity.owid.PublicKeyFetch;
+
+OwidVerificationResult result = PublicKeyFetch.verify(
+    owid, "https", Collections.<Owid>emptyList());
+if (result.getStatus() == OwidSignatureStatus.KEY_UNAVAILABLE) {
+    // The key could not be obtained, so the signature was never examined.
+    // Only SIGNATURE_INVALID means the identifier should be distrusted.
+}
+```
+
+Where the whole published schedule is already held, `PublicKeySchedule`
+chooses the key without any request. The rule is the one the cloud itself
+applies, being the latest key whose start is at or before the date asked
+about.
+
+```java
+import com.swancommunity.owid.DatedPublicKey;
+import com.swancommunity.owid.PublicKeySchedule;
+
+PublicKeySchedule schedule = PublicKeySchedule.of(Arrays.asList(
+    DatedPublicKey.of(Instant.parse("2026-08-24T00:00:00Z"), lastWeekPem),
+    DatedPublicKey.of(Instant.parse("2026-08-31T00:00:00Z"), thisWeekPem)));
+OwidVerificationResult result = schedule.verify(
+    owid, Collections.<Owid>emptyList());
+```
+
+Both snippets are compiled and run by `ReadmeExampleTest`, as the rest of
+the examples in this file are. The fetch one runs against a creator domain in
+the reserved `.invalid` name space, so it shows the shape of the call and the
+status a key that cannot be obtained produces, whilst the case where the key
+does arrive and the identifier verifies is covered by `DatedKeyFetchTest`
+against a stand in on the loopback address.
+
+The only date a key carries here is the date the key came into force. The
+moment key material was generated is deliberately absent, because creators
+generate keys in batches weeks ahead of the weeks the keys cover, so many
+keys share one generation moment while starting on different days. Choosing
+by the generation moment picks a key that has not started yet and reports a
+genuine identifier as not matching, which is the defect the .NET port
+carried. The fixture the tests run against holds thirteen real keys generated
+in one batch, so that rule is shown failing on real data and the rule this
+library uses is shown succeeding on the same data.
 
 ## Reading, and why it does not throw
 
@@ -315,6 +383,28 @@ domain, a null payload, or a field that cannot be serialized.
     the domain to the creator domain, the date to the current time and the
     version to the current version. Both take an optional list of other OWIDs
     to cover with the same signature.
+- `PublicKeyFetch` obtains the key of another creator from the well known end
+  point on the domain the OWID carries.
+  - `publicKeyUrl` builds the request, naming the version of the OWID and the
+    minute the OWID was signed.
+  - `publicKeyPem` returns the key, raising `PublicKeyFetchException`, which
+    carries the status to report, the domain and the response code.
+  - `verify` answers with the status, so a key that could not be fetched is
+    `KEY_UNAVAILABLE`, one that could not be read is `INVALID_KEY`, and
+    neither is mistaken for a signature that does not match.
+  - `clearCache` empties the keys already fetched.
+- `PublicKeySchedule` holds the keys a creator has published and chooses
+  between them.
+  - `PublicKeySchedule.of` takes the keys in any order.
+  - `keyInForce` and `keyFor` return the latest key whose start is at or
+    before the date, or the date of the OWID, and null where the schedule
+    does not reach back that far.
+  - `current` returns the key in force now, and `last` the key with the
+    latest start, which for a schedule published ahead of time is usually a
+    key that has not begun. `verify` chooses the key and answers with the
+    status.
+- `DatedPublicKey` is one key and the date the key came into force. It holds
+  no generation moment, so nothing can select by one.
 - `Endpoints` provides framework agnostic helpers for the well known end
   points.
   - `creatorResponse` returns JSON with the fields `domain`, `name`,
@@ -378,6 +468,14 @@ the parse contract, being every status the reading surfaces report together
 with a run of malformed buffers that must never throw, the framed read and
 what it consumes, and the construction boundary, which is checked from a package outside the library because a check
 made from inside it would measure nothing.
+
+The dated key tests use two real fixtures, being a 51Did creator context
+identifier created on 4 September 2026 for the creator domain 51d.es and the
+thirty weekly keys that domain published from 11 May to 30 November 2026.
+Both are public and carry no secret. The live end point answers 401 without a
+credential, so the fetch runs against a stand in on the loopback address
+which serves that same schedule, and the URL under test is the one the
+library builds with only the host replaced.
 
 ## License
 
