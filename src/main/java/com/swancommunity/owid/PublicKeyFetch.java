@@ -237,6 +237,16 @@ public final class PublicKeyFetch {
                         null);
             }
             connection = (HttpURLConnection) opened;
+            // Never follow a redirect. HttpURLConnection follows one to
+            // any other host by default, so a creator whose domain
+            // answered 302 to some other place would have that other
+            // place's key trusted as its own, and a network attacker able
+            // to bend the creator's DNS, or a creator that was simply
+            // misconfigured, could put a key there and have forgeries
+            // verify. Left alone, the 3xx is the response code, and the
+            // check below reads it as the key being unavailable, which it
+            // is.
+            connection.setInstanceFollowRedirects(false);
             connection.setRequestMethod("GET");
             connection.setConnectTimeout(CONNECT_TIMEOUT_MILLISECONDS);
             connection.setReadTimeout(READ_TIMEOUT_MILLISECONDS);
