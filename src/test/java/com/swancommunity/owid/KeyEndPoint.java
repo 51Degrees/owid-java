@@ -66,7 +66,13 @@ final class KeyEndPoint {
         SCHEDULE,
 
         /** Text shaped like a PEM that no key can be read out of. */
-        BROKEN_KEY
+        BROKEN_KEY,
+
+        /**
+         * A redirect to somewhere else, which a client must not follow.
+         * Started with {@link #start(Answer, String)} naming where.
+         */
+        REDIRECT
     }
 
     private final HttpServer server;
@@ -87,6 +93,15 @@ final class KeyEndPoint {
     /** Starts an end point serving what the answer says. */
     static KeyEndPoint start(final Answer answer)
             throws IOException, OwidException {
+        return start(answer, null);
+    }
+
+    /**
+     * Starts an end point serving what the answer says, redirecting to
+     * the URL given where the answer is {@link Answer#REDIRECT}.
+     */
+    static KeyEndPoint start(final Answer answer, final String redirectTo)
+            throws IOException, OwidException {
         final PublicKeySchedule schedule = KeyFixtures.schedule();
         HttpServer server = HttpServer.create(new InetSocketAddress(
                 InetAddress.getByName("127.0.0.1"), 0), 0);
@@ -98,6 +113,12 @@ final class KeyEndPoint {
                 String date = parameter(
                         exchange.getRequestURI().getRawQuery(), "date");
                 endPoint.dates.add(date);
+                if (answer == Answer.REDIRECT) {
+                    exchange.getResponseHeaders().set("Location", redirectTo);
+                    exchange.sendResponseHeaders(302, -1);
+                    exchange.close();
+                    return;
+                }
                 String body;
                 try {
                     body = body(schedule, answer, date);

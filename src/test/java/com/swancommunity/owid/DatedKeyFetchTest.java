@@ -234,6 +234,34 @@ class DatedKeyFetchTest {
      * end points served PEM a strict parser refused and every offline check
      * against them failed while the keys and the identifiers were both fine.
      */
+    /**
+     * A creator whose domain answers with a redirect does not get the key
+     * at the other end trusted as its own. The other end here serves the
+     * genuine schedule, so following the redirect would read as valid,
+     * and refusing it must read as the key being unavailable with the
+     * request to the other host never made. Without this a network
+     * attacker able to bend a creator's DNS, or a misconfigured creator,
+     * could substitute the key and forgeries would verify.
+     */
+    @Test
+    void aRedirectIsNotFollowed() throws IOException, OwidException {
+        Owid owid = KeyFixtures.identifier();
+        KeyEndPoint elsewhere = endPoint(KeyEndPoint.Answer.SCHEDULE);
+        KeyEndPoint creator = KeyEndPoint.start(
+                KeyEndPoint.Answer.REDIRECT, elsewhere.urlFor(owid));
+        started.add(creator);
+        assertEquals(OwidSignatureStatus.KEY_UNAVAILABLE,
+                PublicKeyFetch.verifyAtUrl(owid, creator.urlFor(owid), ALONE)
+                        .getStatus(),
+                "a redirect is the key being unavailable, never a key from "
+                        + "wherever it points");
+        assertEquals(1, creator.dates().size(),
+                "the creator was asked once");
+        assertTrue(elsewhere.dates().isEmpty(),
+                "the request that would have gone to the other host was "
+                        + "never made");
+    }
+
     @Test
     void aKeyThatCannotBeReadIsInvalidKey()
             throws IOException, OwidException {
